@@ -1,0 +1,8 @@
+node_modules
+data/
+config/
+.wwebjs_cache
+.git
+.env
+npm-debug.log
+EOF
