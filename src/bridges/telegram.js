@@ -120,6 +120,9 @@ _All systems operational._ ✨`;
     const chatId = msg.chat.id;
     const content = msg.text;
 
+    // Store user message immediately
+    addMessage("telegram", chatId, "user", content);
+
     // Send typing action
     this.bot.sendChatAction(chatId, "typing");
 
@@ -127,11 +130,10 @@ _All systems operational._ ✨`;
     const history = getHistory("telegram", chatId);
 
     try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
+      // Get LLM response, passing history without the newly added user message since chat() appends it
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      // Store messages
-      addMessage("telegram", chatId, "user", content);
+      // Store assistant message
       addMessage("telegram", chatId, "assistant", response);
 
       // Split long messages (Telegram has 4096 char limit)

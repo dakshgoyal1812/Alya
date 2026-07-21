@@ -214,20 +214,6 @@ export const availableTools = [
   {
     type: "function",
     function: {
-      name: "execute_python_code",
-      description: "A secure sandbox to execute Python code. You can use this to perform complex math, analyze data, or run algorithms. The code is saved to a temp file and executed on the host.",
-      parameters: {
-        type: "object",
-        properties: {
-          code: { type: "string", description: "The raw Python code to execute. MUST use print() to output results so they can be captured." }
-        },
-        required: ["code"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
       name: "control_spotify",
       description: "Play, pause, or skip music on the user's Spotify account.",
       parameters: {
@@ -379,29 +365,59 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
-                });
+          if (os.platform() === "win32") {
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
               }
             }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            // Linux/macOS compatibility using 'df -k'
+            const output = execSync("df -k", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 6) {
+                const filesystem = parts[0];
+                if (filesystem.startsWith("/dev/") || parts[5] === "/") {
+                  const totalKB = parseInt(parts[1]) || 0;
+                  const usedKB = parseInt(parts[2]) || 0;
+                  const freeKB = parseInt(parts[3]) || 0;
+                  const usagePercent = parts[4];
+                  const mountPoint = parts[5];
+                  if (totalKB > 0) {
+                    drives.push({
+                      drive: mountPoint,
+                      filesystem,
+                      totalGB: (totalKB / 1048576).toFixed(1),
+                      usedGB: (usedKB / 1048576).toFixed(1),
+                      freeGB: (freeKB / 1048576).toFixed(1),
+                      usagePercent
+                    });
+                  }
+                }
+              }
+            }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -413,9 +429,14 @@ export async function executeTool(name, args) {
         }
       }
 
-      case "calculator":
+      case "calculator": {
         // Safe evaluation of simple math
-        return String(new Function(`return ${args.expression}`)());
+        const expr = String(args.expression || "").trim();
+        if (!/^[0-9+\-*/().\s]+$/.test(expr)) {
+          return "Error: Invalid math expression. Only numbers and basic operators (+, -, *, /, (, )) are allowed.";
+        }
+        return String(new Function(`return ${expr}`)());
+      }
 
       case "send_email": {
         const config = loadConfig();
@@ -493,7 +514,26 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
-          const response = await fetch(args.url);
+          const urlStr = args.url;
+          const parsedUrl = new URL(urlStr);
+          const hostname = parsedUrl.hostname.toLowerCase();
+
+          // SSRF Protection: Block local, loopback, private, and broadcast IPs/hostnames
+          const isLocal =
+            hostname === "localhost" ||
+            hostname === "127.0.0.1" ||
+            hostname === "0.0.0.0" ||
+            hostname === "::1" ||
+            hostname.startsWith("10.") ||
+            hostname.startsWith("192.168.") ||
+            hostname.startsWith("172.16.") ||
+            hostname.startsWith("169.254.");
+
+          if (isLocal) {
+            return "Error: Access to local, private, or loopback network addresses is restricted for security.";
+          }
+
+          const response = await fetch(urlStr);
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
           // Extremely basic text extraction (strip html and scripts)
@@ -570,8 +610,23 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          const resolvedPath = path.resolve(args.absolutePath);
+          const normalizedPath = resolvedPath.toLowerCase();
+
+          // Basic security: Block path traversal and highly sensitive system directories
+          if (
+            normalizedPath.includes("..") ||
+            normalizedPath.includes("/etc/") ||
+            normalizedPath.includes("/var/") ||
+            normalizedPath.includes("/etc/passwd") ||
+            normalizedPath.includes("windows\\system32") ||
+            normalizedPath.includes("windows/system32")
+          ) {
+            return "Error: Access to this file path is restricted for security reasons.";
+          }
+
+          if (!fs.existsSync(resolvedPath)) return `File not found at: ${args.absolutePath}`;
+          const dataBuffer = fs.readFileSync(resolvedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +636,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "Error: Python code execution is disabled for security reasons to prevent Remote Code Execution (RCE).";
       }
 
       case "control_spotify": {
