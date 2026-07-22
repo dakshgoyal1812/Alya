@@ -144,8 +144,12 @@ export function clearHistory(platform, channelId) {
  */
 export function flushAll() {
   for (const [key] of conversations) {
-    const [platform, channelId] = key.split(":");
-    saveToDisk(platform, channelId);
+    const firstColonIndex = key.indexOf(":");
+    if (firstColonIndex !== -1) {
+      const platform = key.substring(0, firstColonIndex);
+      const channelId = key.substring(firstColonIndex + 1);
+      saveToDisk(platform, channelId);
+    }
   }
 }
 
