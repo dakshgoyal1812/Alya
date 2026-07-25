@@ -96,9 +96,12 @@ export class WhatsAppBridge {
 
     chat.sendStateTyping();
     const history = getHistory("whatsapp", chatId);
+
+    // Store user message immediately on receipt to prevent race conditions
+    addMessage("whatsapp", chatId, "user", content);
+
     try {
-      const response = await this.llm.chat(history, content);
-      addMessage("whatsapp", chatId, "user", content);
+      const response = await this.llm.chat(history.slice(0, -1), content);
       addMessage("whatsapp", chatId, "assistant", response);
 
       // Check for <voice> tag

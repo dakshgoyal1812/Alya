@@ -413,9 +413,14 @@ export async function executeTool(name, args) {
         }
       }
 
-      case "calculator":
-        // Safe evaluation of simple math
-        return String(new Function(`return ${args.expression}`)());
+      case "calculator": {
+        const expression = args.expression;
+        // Sanitize the mathematical expression with a strict regular expression
+        if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
+          return "Error: Invalid characters in mathematical expression. Only numbers, operators (+, -, *, /), parentheses, decimals, and whitespace are allowed.";
+        }
+        return String(new Function(`return ${expression}`)());
+      }
 
       case "send_email": {
         const config = loadConfig();
@@ -493,6 +498,27 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
+          const urlObj = new URL(args.url);
+          if (urlObj.protocol !== "http:" && urlObj.protocol !== "https:") {
+            return "Error: Invalid protocol. Only HTTP and HTTPS are allowed.";
+          }
+          const hostname = urlObj.hostname.toLowerCase();
+          // SSRF protection: Block local, loopback, private, and broadcast IPs/hostnames
+          const localHosts = ["localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254"];
+          if (
+            localHosts.includes(hostname) ||
+            hostname.startsWith("192.168.") ||
+            hostname.startsWith("10.") ||
+            hostname.startsWith("172.16.") ||
+            hostname.startsWith("172.17.") ||
+            hostname.startsWith("172.18.") ||
+            hostname.startsWith("172.19.") ||
+            hostname.startsWith("172.2") ||
+            hostname.startsWith("172.3")
+          ) {
+            return "Access denied: Requesting local, private, or metadata network addresses is prohibited.";
+          }
+
           const response = await fetch(args.url);
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
@@ -570,8 +596,24 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          const resolvedPath = path.resolve(args.absolutePath);
+          const cwd = process.cwd();
+
+          // Prevent directory traversal attacks
+          if (!resolvedPath.startsWith(cwd)) {
+            return "Access denied: Paths outside the application directory are restricted.";
+          }
+
+          // Block sensitive system paths explicitly
+          const sensitivePatterns = [
+            /etc\//, /var\//, /windows\//, /system32/i, /proc\//, /sys\//
+          ];
+          if (sensitivePatterns.some(p => p.test(resolvedPath))) {
+            return "Access denied: Accessing sensitive system directories is forbidden.";
+          }
+
+          if (!fs.existsSync(resolvedPath)) return `File not found at: ${args.absolutePath}`;
+          const dataBuffer = fs.readFileSync(resolvedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +623,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "[Security Warning: The Python execution tool is disabled on this system as a critical security measure to prevent arbitrary remote code execution (RCE) on the host machine.]";
       }
 
       case "control_spotify": {

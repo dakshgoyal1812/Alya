@@ -102,12 +102,14 @@ export class DiscordBridge {
     // Get conversation history
     const history = getHistory("discord", message.channel.id);
 
-    try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
+    // Store user message immediately on receipt to prevent race conditions
+    addMessage("discord", message.channel.id, "user", content);
 
-      // Store messages
-      addMessage("discord", message.channel.id, "user", content);
+    try {
+      // Get LLM response (pass history excluding the newly added user message)
+      const response = await this.llm.chat(history.slice(0, -1), content);
+
+      // Store assistant message
       addMessage("discord", message.channel.id, "assistant", response);
 
       // Split long responses (Discord has 2000 char limit)
