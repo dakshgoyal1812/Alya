@@ -69,16 +69,18 @@ export class WebBridge {
 
         const history = getHistory("web", sessionId);
 
+        // Store user message immediately on receipt to prevent race conditions
+        addMessage("web", sessionId, "user", message);
+
         // Stream response
         let fullResponse = "";
         socket.emit("typing", true);
 
         try {
-          fullResponse = await this.llm.chatStream(history, message, (chunk) => {
+          fullResponse = await this.llm.chatStream(history.slice(0, -1), message, (chunk) => {
             socket.emit("stream", { content: chunk });
           });
 
-          addMessage("web", sessionId, "user", message);
           addMessage("web", sessionId, "assistant", fullResponse);
 
           socket.emit("stream_end", {
