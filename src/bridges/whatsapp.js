@@ -95,10 +95,13 @@ export class WhatsAppBridge {
     }
 
     chat.sendStateTyping();
+    // Store user message immediately to prevent race conditions
+    addMessage("whatsapp", chatId, "user", content);
+
     const history = getHistory("whatsapp", chatId);
     try {
-      const response = await this.llm.chat(history, content);
-      addMessage("whatsapp", chatId, "user", content);
+      // Get LLM response (exclude the last user message we just added from historical context)
+      const response = await this.llm.chat(history.slice(0, -1), content);
       addMessage("whatsapp", chatId, "assistant", response);
 
       // Check for <voice> tag
