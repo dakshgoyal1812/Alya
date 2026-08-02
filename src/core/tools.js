@@ -16,6 +16,34 @@ if (!fs.existsSync(path.join(process.cwd(), "data"))) fs.mkdirSync(path.join(pro
 if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify([]));
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 
+function isPrivateOrLoopback(hostname) {
+  if (!hostname) return true;
+  const host = hostname.toLowerCase().trim();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") return true;
+
+  const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const match = host.match(ipv4Regex);
+  if (match) {
+    const [_, octet1, octet2, octet3, octet4] = match.map(Number);
+    if (octet1 < 0 || octet1 > 255 || octet2 < 0 || octet2 > 255 || octet3 < 0 || octet3 > 255 || octet4 < 0 || octet4 > 255) {
+      return true; // invalid IP
+    }
+    // 127.0.0.0/8 (loopback)
+    if (octet1 === 127) return true;
+    // 10.0.0.0/8 (private)
+    if (octet1 === 10) return true;
+    // 172.16.0.0/12 (private)
+    if (octet1 === 172 && (octet2 >= 16 && octet2 <= 31)) return true;
+    // 192.168.0.0/16 (private)
+    if (octet1 === 192 && octet2 === 168) return true;
+    // 169.254.0.0/16 (link-local)
+    if (octet1 === 169 && octet2 === 254) return true;
+    // 224.0.0.0/4 (multicast / broadcast)
+    if (octet1 >= 224) return true;
+  }
+  return false;
+}
+
 // Define the tools Alya can use (SAFE tools only — no file system access)
 export const availableTools = [
   {
@@ -215,7 +243,7 @@ export const availableTools = [
     type: "function",
     function: {
       name: "execute_python_code",
-      description: "A secure sandbox to execute Python code. You can use this to perform complex math, analyze data, or run algorithms. The code is saved to a temp file and executed on the host.",
+      description: "A secure sandbox to execute Python code. (Note: Currently disabled on host environments for safety).",
       parameters: {
         type: "object",
         properties: {
@@ -379,29 +407,56 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
-                });
+          if (os.platform() === "win32") {
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
               }
             }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            // Linux / macOS compatibility
+            const output = execSync("df -k", { encoding: "utf-8" });
+            const lines = output.trim().split("\n");
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 6) {
+                const filesystem = parts[0];
+                const totalKB = parseInt(parts[1]) || 0;
+                const freeKB = parseInt(parts[3]) || 0;
+                const usedKB = totalKB - freeKB;
+                const mount = parts[5];
+                if (totalKB > 0 && (mount === "/" || mount.startsWith("/Volumes") || mount.startsWith("/media") || mount.startsWith("/mnt"))) {
+                  drives.push({
+                    drive: mount,
+                    filesystem,
+                    totalGB: (totalKB / 1048576).toFixed(1),
+                    usedGB: (usedKB / 1048576).toFixed(1),
+                    freeGB: (freeKB / 1048576).toFixed(1),
+                    usagePercent: Math.round((usedKB / totalKB) * 100) + "%"
+                  });
+                }
+              }
+            }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -413,9 +468,14 @@ export async function executeTool(name, args) {
         }
       }
 
-      case "calculator":
-        // Safe evaluation of simple math
-        return String(new Function(`return ${args.expression}`)());
+      case "calculator": {
+        const expression = args.expression;
+        const safeExpressionPattern = /^[0-9+\-*/().\s]+$/;
+        if (!safeExpressionPattern.test(expression)) {
+          return "Error: Invalid characters in mathematical expression. Only numbers and basic operators are allowed.";
+        }
+        return String(new Function(`return ${expression}`)());
+      }
 
       case "send_email": {
         const config = loadConfig();
@@ -493,6 +553,11 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
+          const parsedUrl = new URL(args.url);
+          if (isPrivateOrLoopback(parsedUrl.hostname)) {
+            return "Error: Access to private or loopback networks is forbidden.";
+          }
+
           const response = await fetch(args.url);
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
@@ -570,8 +635,17 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          const resolvedPath = path.resolve(args.absolutePath);
+          const projectRoot = process.cwd();
+          if (!resolvedPath.startsWith(projectRoot)) {
+            return "Error: Access denied. You can only read files within the project directory.";
+          }
+          if (resolvedPath.includes("..") || /[\/\\](etc|var|system32|config|\.git)[\/\\]/i.test(resolvedPath) || resolvedPath.endsWith(".env") || resolvedPath.includes("config.json")) {
+            return "Error: Access denied. Reading sensitive system paths is forbidden.";
+          }
+
+          if (!fs.existsSync(resolvedPath)) return `File not found at: ${args.absolutePath}`;
+          const dataBuffer = fs.readFileSync(resolvedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +655,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "Error: The execute_python_code tool is disabled on host environments for security reasons. Please use safe tools or contact the administrator.";
       }
 
       case "control_spotify": {
