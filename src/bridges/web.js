@@ -67,6 +67,9 @@ export class WebBridge {
         const { message } = data;
         if (!message?.trim()) return;
 
+        // Store user message immediately to prevent race conditions during rapid concurrent typing
+        addMessage("web", sessionId, "user", message);
+
         const history = getHistory("web", sessionId);
 
         // Stream response
@@ -74,11 +77,11 @@ export class WebBridge {
         socket.emit("typing", true);
 
         try {
-          fullResponse = await this.llm.chatStream(history, message, (chunk) => {
+          // Get LLM stream (slice off the user message from history, passing it as userMessage parameter)
+          fullResponse = await this.llm.chatStream(history.slice(0, -1), message, (chunk) => {
             socket.emit("stream", { content: chunk });
           });
 
-          addMessage("web", sessionId, "user", message);
           addMessage("web", sessionId, "assistant", fullResponse);
 
           socket.emit("stream_end", {
