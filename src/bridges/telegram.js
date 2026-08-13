@@ -120,18 +120,20 @@ _All systems operational._ ✨`;
     const chatId = msg.chat.id;
     const content = msg.text;
 
+    // Store user message immediately to prevent race conditions during rapid concurrent typing
+    addMessage("telegram", chatId, "user", content);
+
     // Send typing action
     this.bot.sendChatAction(chatId, "typing");
 
-    // Get conversation history
+    // Get conversation history (which now includes the user message at the end)
     const history = getHistory("telegram", chatId);
 
     try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
+      // Get LLM response (slice off the user message from history, passing it as userMessage parameter)
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      // Store messages
-      addMessage("telegram", chatId, "user", content);
+      // Store assistant message
       addMessage("telegram", chatId, "assistant", response);
 
       // Split long messages (Telegram has 4096 char limit)
