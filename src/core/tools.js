@@ -379,29 +379,47 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
-                });
+          if (process.platform === "win32") {
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
               }
             }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            const output = execSync("df -k /", { encoding: "utf-8" });
+            const lines = output.trim().split("\n");
+            if (lines.length >= 2) {
+              const parts = lines[1].trim().split(/\s+/);
+              const totalKB = parseInt(parts[1]) || 0;
+              const usedKB = parseInt(parts[2]) || 0;
+              const freeKB = parseInt(parts[3]) || 0;
+              return JSON.stringify({
+                drive: "/",
+                totalGB: (totalKB / 1048576).toFixed(1),
+                usedGB: (usedKB / 1048576).toFixed(1),
+                freeGB: (freeKB / 1048576).toFixed(1),
+                usagePercent: totalKB > 0 ? Math.round((usedKB / totalKB) * 100) + "%" : "0%",
+                deviceName: os.hostname()
+              });
+            }
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -414,7 +432,9 @@ export async function executeTool(name, args) {
       }
 
       case "calculator":
-        // Safe evaluation of simple math
+        if (!/^[0-9+\-*/().\s]+$/.test(args.expression || "")) {
+          return "Error: Invalid math expression. Only basic arithmetic numbers and operators (+, -, *, /, (), .) are allowed.";
+        }
         return String(new Function(`return ${args.expression}`)());
 
       case "send_email": {
@@ -493,6 +513,14 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
+          const parsedUrl = new URL(args.url);
+          if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+            return "Error: Only http and https protocols are allowed.";
+          }
+          const hostname = parsedUrl.hostname.toLowerCase();
+          if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname === "::1" || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
+            return "Security Error: Access to local/internal network resources is restricted.";
+          }
           const response = await fetch(args.url);
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
@@ -570,8 +598,18 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          if (!args.absolutePath || typeof args.absolutePath !== "string") {
+            return "Error: Invalid file path.";
+          }
+          if (args.absolutePath.includes("..")) {
+            return "Security Error: Path traversal sequences ('..') are not allowed.";
+          }
+          const normalizedPath = path.resolve(args.absolutePath).replace(/\\/g, "/");
+          if (normalizedPath.startsWith("/etc/") || normalizedPath.startsWith("/var/") || normalizedPath.includes("system32")) {
+            return "Security Error: Access to system directory is restricted.";
+          }
+          if (!fs.existsSync(normalizedPath)) return `File not found at: ${args.absolutePath}`;
+          const dataBuffer = fs.readFileSync(normalizedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +619,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "Security Error: Python execution tool is disabled for security reasons.";
       }
 
       case "control_spotify": {
