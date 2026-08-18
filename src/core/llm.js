@@ -367,17 +367,22 @@ export class LLMEngine {
   }
 }
 
+// Hoisted Regular Expressions for cleanResponse optimization
+const RE_FUNCTION = /<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi;
+const RE_TOOL_CALL = /<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi;
+const RE_SPECIAL_TAG = /<\|[a-zA-Z0-9_]+\|>/g;
+
 /**
  * Removes leaked Llama 3 internal tags and raw function codes from the final output
  */
 function cleanResponse(text) {
   if (!text) return "";
-  let clean = text;
-  // Strip <function=...>...</function> or unclosed <function...>
-  clean = clean.replace(/<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi, "");
-  // Strip <tool_call>...</tool_call>
-  clean = clean.replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "");
-  // Strip Llama 3 special tokens like <|eot_id|>
-  clean = clean.replace(/<\|[a-zA-Z0-9_]+\|>/g, "");
-  return clean.trim();
+  // Fast-path: Skip regex matching if string contains no '<' character
+  if (!text.includes("<")) return text.trim();
+
+  return text
+    .replace(RE_FUNCTION, "")
+    .replace(RE_TOOL_CALL, "")
+    .replace(RE_SPECIAL_TAG, "")
+    .trim();
 }
