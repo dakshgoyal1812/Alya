@@ -1,6 +1,7 @@
 import os from "os";
 import fs from "fs";
 import path from "path";
+import dns from "dns/promises";
 import { YoutubeTranscript } from "youtube-transcript";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
@@ -379,29 +380,56 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
-                });
+          if (os.platform() === "win32") {
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
               }
             }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            const output = execSync("df -k /", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            if (lines.length >= 2) {
+              const parts = lines[1].trim().split(/\s+/);
+              const mountIndex = os.platform() === "darwin" && parts.length >= 9 ? 8 : parts.length - 1;
+              const usageIndex = os.platform() === "darwin" && parts.length >= 9 ? 4 : parts.length - 2;
+              const availIndex = usageIndex - 1;
+              const usedIndex = availIndex - 1;
+              const totalIndex = usedIndex - 1;
+
+              const totalKB = parseInt(parts[totalIndex]) || 0;
+              const usedKB = parseInt(parts[usedIndex]) || 0;
+              const freeKB = parseInt(parts[availIndex]) || 0;
+
+              return JSON.stringify({
+                drives: [{
+                  drive: parts[mountIndex] || "/",
+                  totalGB: (totalKB / 1024 / 1024).toFixed(1),
+                  usedGB: (usedKB / 1024 / 1024).toFixed(1),
+                  freeGB: (freeKB / 1024 / 1024).toFixed(1),
+                  usagePercent: parts[usageIndex] || (totalKB ? Math.round((usedKB / totalKB) * 100) + "%" : "0%")
+                }],
+                deviceName: os.hostname()
+              });
+            }
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -415,6 +443,9 @@ export async function executeTool(name, args) {
 
       case "calculator":
         // Safe evaluation of simple math
+        if (!/^[0-9+\-*/().\s]+$/.test(args.expression)) {
+          return "Error: Invalid mathematical expression. Only basic arithmetic operators and numbers are allowed.";
+        }
         return String(new Function(`return ${args.expression}`)());
 
       case "send_email": {
@@ -493,17 +524,65 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
-          const response = await fetch(args.url);
-          if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
-          const html = await response.text();
-          // Extremely basic text extraction (strip html and scripts)
-          const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-          let text = bodyMatch ? bodyMatch[1] : html;
-          text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
-          text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
-          text = text.replace(/<[^>]+>/g, " ");
-          text = text.replace(/\s+/g, " ").trim();
-          return text.substring(0, 10000); // Return up to 10k chars to avoid blowing up context
+          let currentUrl = args.url;
+          let redirects = 0;
+
+          const isPrivateIP = (ip) => {
+            if (ip === "127.0.0.1" || ip === "::1" || ip === "0.0.0.0") return true;
+            if (ip.startsWith("10.") || ip.startsWith("127.")) return true;
+            if (ip.startsWith("172.")) {
+              const parts = ip.split(".");
+              const second = parseInt(parts[1], 10);
+              if (second >= 16 && second <= 31) return true;
+            }
+            if (ip.startsWith("192.168.")) return true;
+            if (ip.startsWith("169.254.")) return true;
+            return false;
+          };
+
+          const validateUrl = async (targetUrlStr) => {
+            const parsed = new URL(targetUrlStr);
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+              throw new Error("Only http and https protocols are allowed.");
+            }
+
+            const hostname = parsed.hostname;
+            if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
+              throw new Error("Access to local addresses is forbidden.");
+            }
+
+            const addresses = await dns.lookup(hostname, { all: true });
+            for (const addr of addresses) {
+              if (isPrivateIP(addr.address)) {
+                throw new Error(`Access to private network IP (${addr.address}) is forbidden.`);
+              }
+            }
+            return parsed;
+          };
+
+          while (redirects < 5) {
+            const parsedUrl = await validateUrl(currentUrl);
+            const response = await fetch(parsedUrl.toString(), { redirect: "manual" });
+
+            if (response.status >= 300 && response.status < 400 && response.headers.has("location")) {
+              const location = response.headers.get("location");
+              currentUrl = new URL(location, parsedUrl.toString()).toString();
+              redirects++;
+              continue;
+            }
+
+            if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
+            const html = await response.text();
+            const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+            let text = bodyMatch ? bodyMatch[1] : html;
+            text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
+            text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+            text = text.replace(/<[^>]+>/g, " ");
+            text = text.replace(/\s+/g, " ").trim();
+            return text.substring(0, 10000);
+          }
+
+          return "Too many redirects.";
         } catch (err) {
           return `Failed to read website: ${err.message}`;
         }
@@ -570,8 +649,17 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          if (!args.absolutePath || args.absolutePath.includes("..")) {
+            return "Error: Path traversal or invalid path detected.";
+          }
+          const resolvedPath = path.resolve(args.absolutePath);
+          const normalizedPath = resolvedPath.replace(/\\/g, "/");
+          const blockedPrefixes = ["/etc/", "/var/", "/usr/", "/bin/", "/sbin/", "c:/windows/", "c:/system32/"];
+          if (blockedPrefixes.some(prefix => normalizedPath.toLowerCase().startsWith(prefix))) {
+            return "Error: Access to system directory is forbidden.";
+          }
+          if (!fs.existsSync(resolvedPath)) return `File not found at: ${resolvedPath}`;
+          const dataBuffer = fs.readFileSync(resolvedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +669,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "Error: Python code execution tool is disabled for security reasons.";
       }
 
       case "control_spotify": {
