@@ -78,13 +78,15 @@ export class SlackBridge {
       return;
     }
 
+    // Store user message immediately
+    addMessage("slack", channelId, "user", content);
+
     // Get conversation history
     const history = getHistory("slack", channelId);
 
     try {
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say(response);
@@ -107,12 +109,14 @@ export class SlackBridge {
       return;
     }
 
+    // Store user message immediately
+    addMessage("slack", channelId, "user", content);
+
     const history = getHistory("slack", channelId);
 
     try {
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say({
