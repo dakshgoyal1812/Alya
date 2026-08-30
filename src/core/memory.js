@@ -144,8 +144,14 @@ export function clearHistory(platform, channelId) {
  */
 export function flushAll() {
   for (const [key] of conversations) {
-    const [platform, channelId] = key.split(":");
-    saveToDisk(platform, channelId);
+    // Performance optimization: Use indexOf & substring instead of split(":")
+    // to avoid intermediate array allocations and prevent channel IDs containing colons from being truncated.
+    const colonIndex = key.indexOf(":");
+    if (colonIndex !== -1) {
+      const platform = key.substring(0, colonIndex);
+      const channelId = key.substring(colonIndex + 1);
+      saveToDisk(platform, channelId);
+    }
   }
 }
 
@@ -160,7 +166,9 @@ export function getStats() {
   for (const [key, messages] of conversations) {
     totalConversations++;
     totalMessages += messages.length;
-    const platform = key.split(":")[0];
+    // Performance optimization: Avoid split(":") array allocation when extracting platform prefix.
+    const colonIndex = key.indexOf(":");
+    const platform = colonIndex !== -1 ? key.substring(0, colonIndex) : key;
     platforms[platform] = (platforms[platform] || 0) + 1;
   }
 
