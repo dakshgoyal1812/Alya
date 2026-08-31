@@ -379,29 +379,51 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+          if (process.platform === "win32") {
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
+              }
+            }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            // Linux / macOS (darwin)
+            const output = execSync("df -k /", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            if (lines.length >= 2) {
+              const parts = lines[1].trim().split(/\s+/);
+              if (parts.length >= 4) {
+                const totalKB = parseInt(parts[1], 10) || 0;
+                const usedKB = parseInt(parts[2], 10) || 0;
+                const freeKB = parseInt(parts[3], 10) || 0;
+                const totalGB = (totalKB / 1024 / 1024).toFixed(1);
+                const usedGB = (usedKB / 1024 / 1024).toFixed(1);
+                const freeGB = (freeKB / 1024 / 1024).toFixed(1);
+                const usagePercent = totalKB > 0 ? Math.round((usedKB / totalKB) * 100) + "%" : "0%";
+                return JSON.stringify({
+                  drives: [{ drive: "/", totalGB, usedGB, freeGB, usagePercent }],
+                  deviceName: os.hostname()
                 });
               }
             }
+            throw new Error("Unable to parse df output");
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -414,7 +436,12 @@ export async function executeTool(name, args) {
       }
 
       case "calculator":
-        // Safe evaluation of simple math
+        if (!args.expression || typeof args.expression !== "string") {
+          return "Error: Invalid math expression.";
+        }
+        if (!/^[0-9+\-*/().\s]+$/.test(args.expression)) {
+          return "Error: Expression contains forbidden characters.";
+        }
         return String(new Function(`return ${args.expression}`)());
 
       case "send_email": {
@@ -493,17 +520,40 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
-          const response = await fetch(args.url);
+          let parsedUrl;
+          try {
+            parsedUrl = new URL(args.url);
+          } catch (e) {
+            return "Error: Invalid URL format.";
+          }
+
+          if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+            return "Error: Only http and https protocols are supported.";
+          }
+
+          const hostname = parsedUrl.hostname.toLowerCase();
+          if (
+            hostname === "localhost" ||
+            hostname === "127.0.0.1" ||
+            hostname === "::1" ||
+            hostname.endsWith(".local") ||
+            hostname.startsWith("10.") ||
+            hostname.startsWith("192.168.") ||
+            /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)
+          ) {
+            return "Error: Access to private or local network addresses is restricted.";
+          }
+
+          const response = await fetch(parsedUrl.href);
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
-          // Extremely basic text extraction (strip html and scripts)
           const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
           let text = bodyMatch ? bodyMatch[1] : html;
           text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
           text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
           text = text.replace(/<[^>]+>/g, " ");
           text = text.replace(/\s+/g, " ").trim();
-          return text.substring(0, 10000); // Return up to 10k chars to avoid blowing up context
+          return text.substring(0, 10000);
         } catch (err) {
           return `Failed to read website: ${err.message}`;
         }
@@ -570,8 +620,27 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          if (!args.absolutePath || typeof args.absolutePath !== "string") {
+            return "Error: File path is required.";
+          }
+          if (args.absolutePath.includes("..")) {
+            return "Error: Relative path traversal (..) is not permitted.";
+          }
+          const resolvedPath = path.resolve(args.absolutePath);
+          const normalizedPath = resolvedPath.replace(/\\/g, "/").toLowerCase();
+
+          if (
+            normalizedPath.startsWith("/etc/") ||
+            normalizedPath.startsWith("/var/") ||
+            normalizedPath.startsWith("/proc/") ||
+            normalizedPath.startsWith("/sys/") ||
+            normalizedPath.includes("system32")
+          ) {
+            return "Error: Access to system directory is restricted.";
+          }
+
+          if (!fs.existsSync(resolvedPath)) return `File not found at: ${args.absolutePath}`;
+          const dataBuffer = fs.readFileSync(resolvedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;

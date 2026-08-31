@@ -15,6 +15,11 @@ const CONFIG_PATH = join(__dirname, "..", "..", "config", "config.json");
  * Default configuration
  */
 const DEFAULT_CONFIG = {
+  groq: {
+    apiKey: "",
+    apiKeys: [],
+    model: "llama-3.3-70b-versatile",
+  },
   ollama: {
     host: "http://localhost:11434",
     model: "llama3.2",
