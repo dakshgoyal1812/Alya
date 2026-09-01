@@ -78,13 +78,13 @@ export class SlackBridge {
       return;
     }
 
-    // Get conversation history
+    addMessage("slack", channelId, "user", content);
     const history = getHistory("slack", channelId);
+    const historySnapshot = history.slice(0, -1);
 
     try {
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(historySnapshot, content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say(response);
@@ -107,12 +107,13 @@ export class SlackBridge {
       return;
     }
 
+    addMessage("slack", channelId, "user", content);
     const history = getHistory("slack", channelId);
+    const historySnapshot = history.slice(0, -1);
 
     try {
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(historySnapshot, content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say({
@@ -153,9 +154,10 @@ export class SlackBridge {
     }
 
     // Treat as a question
-    const history = getHistory("slack", command.channel_id);
-    const response = await this.llm.chat(history, command.text);
     addMessage("slack", command.channel_id, "user", command.text);
+    const history = getHistory("slack", command.channel_id);
+    const historySnapshot = history.slice(0, -1);
+    const response = await this.llm.chat(historySnapshot, command.text);
     addMessage("slack", command.channel_id, "assistant", response);
     await respond({ text: response });
   }

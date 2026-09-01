@@ -123,15 +123,16 @@ _All systems operational._ ✨`;
     // Send typing action
     this.bot.sendChatAction(chatId, "typing");
 
-    // Get conversation history
+    // Store incoming user message immediately to prevent race conditions
+    addMessage("telegram", chatId, "user", content);
     const history = getHistory("telegram", chatId);
+    const historySnapshot = history.slice(0, -1);
 
     try {
       // Get LLM response
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(historySnapshot, content);
 
-      // Store messages
-      addMessage("telegram", chatId, "user", content);
+      // Store assistant message
       addMessage("telegram", chatId, "assistant", response);
 
       // Split long messages (Telegram has 4096 char limit)
