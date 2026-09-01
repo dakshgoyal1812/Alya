@@ -67,18 +67,19 @@ export class WebBridge {
         const { message } = data;
         if (!message?.trim()) return;
 
+        addMessage("web", sessionId, "user", message);
         const history = getHistory("web", sessionId);
+        const historySnapshot = history.slice(0, -1);
 
         // Stream response
         let fullResponse = "";
         socket.emit("typing", true);
 
         try {
-          fullResponse = await this.llm.chatStream(history, message, (chunk) => {
+          fullResponse = await this.llm.chatStream(historySnapshot, message, (chunk) => {
             socket.emit("stream", { content: chunk });
           });
 
-          addMessage("web", sessionId, "user", message);
           addMessage("web", sessionId, "assistant", fullResponse);
 
           socket.emit("stream_end", {
