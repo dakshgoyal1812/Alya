@@ -78,13 +78,13 @@ export class SlackBridge {
       return;
     }
 
-    // Get conversation history
-    const history = getHistory("slack", channelId);
+    // Capture history snapshot and store user message immediately to prevent race conditions
+    const historySnapshot = [...getHistory("slack", channelId)];
+    addMessage("slack", channelId, "user", content);
 
     try {
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(historySnapshot, content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say(response);
@@ -107,12 +107,12 @@ export class SlackBridge {
       return;
     }
 
-    const history = getHistory("slack", channelId);
+    const historySnapshot = [...getHistory("slack", channelId)];
+    addMessage("slack", channelId, "user", content);
 
     try {
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(historySnapshot, content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say({
@@ -153,9 +153,9 @@ export class SlackBridge {
     }
 
     // Treat as a question
-    const history = getHistory("slack", command.channel_id);
-    const response = await this.llm.chat(history, command.text);
+    const historySnapshot = [...getHistory("slack", command.channel_id)];
     addMessage("slack", command.channel_id, "user", command.text);
+    const response = await this.llm.chat(historySnapshot, command.text);
     addMessage("slack", command.channel_id, "assistant", response);
     await respond({ text: response });
   }
