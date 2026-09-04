@@ -367,17 +367,25 @@ export class LLMEngine {
   }
 }
 
+// Pre-compiled regex patterns for cleanResponse optimization (avoid recompiling on every call)
+const RE_FUNCTION_TAG = /<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi;
+const RE_TOOL_CALL_TAG = /<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi;
+const RE_SPECIAL_TOKEN = /<\|[a-zA-Z0-9_]+\|>/g;
+
 /**
  * Removes leaked Llama 3 internal tags and raw function codes from the final output
  */
 function cleanResponse(text) {
   if (!text) return "";
+  // Fast path: if there are no '<' characters, no tag stripping is needed
+  if (!text.includes("<")) return text.trim();
+
   let clean = text;
   // Strip <function=...>...</function> or unclosed <function...>
-  clean = clean.replace(/<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi, "");
+  clean = clean.replace(RE_FUNCTION_TAG, "");
   // Strip <tool_call>...</tool_call>
-  clean = clean.replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "");
+  clean = clean.replace(RE_TOOL_CALL_TAG, "");
   // Strip Llama 3 special tokens like <|eot_id|>
-  clean = clean.replace(/<\|[a-zA-Z0-9_]+\|>/g, "");
+  clean = clean.replace(RE_SPECIAL_TOKEN, "");
   return clean.trim();
 }
