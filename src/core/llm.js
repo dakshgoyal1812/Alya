@@ -106,18 +106,9 @@ export class LLMEngine {
   }
 
   async chat(conversationHistory = [], userMessage) {
-    // Performance optimization: Slice conversation history to last 20 messages BEFORE mapping to minimize overhead.
-    const sanitizedHistory = conversationHistory.slice(-20).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      ...(msg.tool_calls && { tool_calls: msg.tool_calls }),
-      ...(msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-      ...(msg.name && { name: msg.name })
-    }));
-
     const messages = [
       { role: "system", content: getSystemPrompt("normal") },
-      ...sanitizedHistory,
+      ...sanitizeHistory(conversationHistory),
       { role: "user", content: userMessage },
     ];
     return await this._processChat(messages);
@@ -192,18 +183,9 @@ export class LLMEngine {
   }
 
   async chatStream(conversationHistory = [], userMessage, onChunk) {
-    // Performance optimization: Slice conversation history to last 20 messages BEFORE mapping to minimize overhead.
-    const sanitizedHistory = conversationHistory.slice(-20).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      ...(msg.tool_calls && { tool_calls: msg.tool_calls }),
-      ...(msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-      ...(msg.name && { name: msg.name })
-    }));
-
     const messages = [
       { role: "system", content: getSystemPrompt("normal") },
-      ...sanitizedHistory,
+      ...sanitizeHistory(conversationHistory),
       { role: "user", content: userMessage },
     ];
     return await this._processChatStream(messages, onChunk);
@@ -324,7 +306,7 @@ export class LLMEngine {
     try {
       const response = await this.openai.chat.completions.create({
         model: this.model,
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: prompt }],
+        messages: [{ role: "system", content: getSystemPrompt("normal") }, { role: "user", content: prompt }],
       });
       this._resetKeyTracker(); // Success — reset key tracker
       return cleanResponse(response.choices[0].message.content) || getErrorMessage("llm_error");
@@ -368,16 +350,40 @@ export class LLMEngine {
 }
 
 /**
- * Removes leaked Llama 3 internal tags and raw function codes from the final output
+ * Module-scoped regex patterns for cleanResponse optimization
+ */
+const FUNCTION_TAG_REGEX = /<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi;
+const TOOL_CALL_TAG_REGEX = /<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi;
+const SPECIAL_TOKENS_REGEX = /<\|[a-zA-Z0-9_]+\|>/g;
+
+/**
+ * Sanitizes conversation history to the last 20 messages for LLM prompts.
+ * Uses direct property assignments to avoid temporary object creation from conditional spreads.
+ */
+function sanitizeHistory(conversationHistory = []) {
+  const recent = conversationHistory.slice(-20);
+  const result = new Array(recent.length);
+  for (let i = 0; i < recent.length; i++) {
+    const msg = recent[i];
+    const cleanMsg = { role: msg.role, content: msg.content };
+    if (msg.tool_calls) cleanMsg.tool_calls = msg.tool_calls;
+    if (msg.tool_call_id) cleanMsg.tool_call_id = msg.tool_call_id;
+    if (msg.name) cleanMsg.name = msg.name;
+    result[i] = cleanMsg;
+  }
+  return result;
+}
+
+/**
+ * Removes leaked Llama 3 internal tags and raw function codes from the final output.
+ * Optimized with module-scoped regex patterns and a fast-path early return for plain text.
  */
 function cleanResponse(text) {
   if (!text) return "";
-  let clean = text;
-  // Strip <function=...>...</function> or unclosed <function...>
-  clean = clean.replace(/<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi, "");
-  // Strip <tool_call>...</tool_call>
-  clean = clean.replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "");
-  // Strip Llama 3 special tokens like <|eot_id|>
-  clean = clean.replace(/<\|[a-zA-Z0-9_]+\|>/g, "");
-  return clean.trim();
+  if (!text.includes("<")) return text.trim();
+  return text
+    .replace(FUNCTION_TAG_REGEX, "")
+    .replace(TOOL_CALL_TAG_REGEX, "")
+    .replace(SPECIAL_TOKENS_REGEX, "")
+    .trim();
 }
