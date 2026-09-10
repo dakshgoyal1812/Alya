@@ -11,7 +11,10 @@ let triedKeys = new Set();
  */
 export async function generateTTS(text) {
   const config = loadConfig();
-  const keys = config.elevenlabs?.apiKeys?.filter(k => k && !k.includes("PASTE")) || [];
+  let keys = config.elevenlabs?.apiKeys?.filter(k => k && !k.includes("PASTE")) || [];
+  if (keys.length === 0 && config.elevenlabs?.apiKey && !config.elevenlabs.apiKey.includes("PASTE")) {
+    keys = [config.elevenlabs.apiKey];
+  }
 
   if (!config.elevenlabs?.enabled || keys.length === 0) {
     console.warn("⚠️ ElevenLabs is not configured or keys are invalid. Falling back to text.");

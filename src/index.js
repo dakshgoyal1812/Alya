@@ -42,7 +42,7 @@ async function main() {
   const groqOk = await llm.isAvailable();
   if (groqOk) {
     console.log(`  ✅ Groq Cloud is connected!`);
-    console.log(`  🤖 Model: ${config.groq.model}`);
+    console.log(`  🤖 Model: ${config.groq?.model || llm.model}`);
   } else {
     console.log(`  ⚠️  Groq API Key is missing or invalid.`);
     console.log(`  Please run 'npm run setup' to add your API key.\n`);
