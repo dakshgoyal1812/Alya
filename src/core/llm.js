@@ -106,14 +106,7 @@ export class LLMEngine {
   }
 
   async chat(conversationHistory = [], userMessage) {
-    // Performance optimization: Slice conversation history to last 20 messages BEFORE mapping to minimize overhead.
-    const sanitizedHistory = conversationHistory.slice(-20).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      ...(msg.tool_calls && { tool_calls: msg.tool_calls }),
-      ...(msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-      ...(msg.name && { name: msg.name })
-    }));
+    const sanitizedHistory = sanitizeHistory(conversationHistory);
 
     const messages = [
       { role: "system", content: getSystemPrompt("normal") },
@@ -192,14 +185,7 @@ export class LLMEngine {
   }
 
   async chatStream(conversationHistory = [], userMessage, onChunk) {
-    // Performance optimization: Slice conversation history to last 20 messages BEFORE mapping to minimize overhead.
-    const sanitizedHistory = conversationHistory.slice(-20).map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      ...(msg.tool_calls && { tool_calls: msg.tool_calls }),
-      ...(msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-      ...(msg.name && { name: msg.name })
-    }));
+    const sanitizedHistory = sanitizeHistory(conversationHistory);
 
     const messages = [
       { role: "system", content: getSystemPrompt("normal") },
@@ -324,7 +310,7 @@ export class LLMEngine {
     try {
       const response = await this.openai.chat.completions.create({
         model: this.model,
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: prompt }],
+        messages: [{ role: "system", content: getSystemPrompt("normal") }, { role: "user", content: prompt }],
       });
       this._resetKeyTracker(); // Success — reset key tracker
       return cleanResponse(response.choices[0].message.content) || getErrorMessage("llm_error");
@@ -367,17 +353,44 @@ export class LLMEngine {
   }
 }
 
+// Pre-compiled regular expressions to avoid re-parsing patterns on every call
+const REGEX_FUNCTION = /<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi;
+const REGEX_TOOL_CALL = /<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi;
+const REGEX_SPECIAL_TOKENS = /<\|[a-zA-Z0-9_]+\|>/g;
+
+/**
+ * Sanitizes conversation history by slicing the last 20 messages and copying required properties
+ * using direct assignment to avoid inline object spreading overhead.
+ */
+function sanitizeHistory(conversationHistory) {
+  const sliced = conversationHistory.slice(-20);
+  const len = sliced.length;
+  const result = new Array(len);
+  for (let i = 0; i < len; i++) {
+    const msg = sliced[i];
+    const item = { role: msg.role, content: msg.content };
+    if (msg.tool_calls) item.tool_calls = msg.tool_calls;
+    if (msg.tool_call_id) item.tool_call_id = msg.tool_call_id;
+    if (msg.name) item.name = msg.name;
+    result[i] = item;
+  }
+  return result;
+}
+
 /**
  * Removes leaked Llama 3 internal tags and raw function codes from the final output
  */
 function cleanResponse(text) {
   if (!text) return "";
+  // Fast path: skip regex execution if no HTML/XML tags or special tokens are present
+  if (!text.includes("<")) return text.trim();
+
   let clean = text;
   // Strip <function=...>...</function> or unclosed <function...>
-  clean = clean.replace(/<function[^>]*>[\s\S]*?(?:<\/function>|$)/gi, "");
+  clean = clean.replace(REGEX_FUNCTION, "");
   // Strip <tool_call>...</tool_call>
-  clean = clean.replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "");
+  clean = clean.replace(REGEX_TOOL_CALL, "");
   // Strip Llama 3 special tokens like <|eot_id|>
-  clean = clean.replace(/<\|[a-zA-Z0-9_]+\|>/g, "");
+  clean = clean.replace(REGEX_SPECIAL_TOKENS, "");
   return clean.trim();
 }
