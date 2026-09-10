@@ -101,13 +101,16 @@ export class DiscordBridge {
 
     // Get conversation history
     const history = getHistory("discord", message.channel.id);
+    const historySnapshot = [...history];
+
+    // Store user message immediately
+    addMessage("discord", message.channel.id, "user", content);
 
     try {
       // Get LLM response
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(historySnapshot, content);
 
-      // Store messages
-      addMessage("discord", message.channel.id, "user", content);
+      // Store assistant response
       addMessage("discord", message.channel.id, "assistant", response);
 
       // Split long responses (Discord has 2000 char limit)
