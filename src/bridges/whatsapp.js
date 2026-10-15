@@ -95,10 +95,11 @@ export class WhatsAppBridge {
     }
 
     chat.sendStateTyping();
+    // Store user message immediately
+    addMessage("whatsapp", chatId, "user", content);
     const history = getHistory("whatsapp", chatId);
     try {
-      const response = await this.llm.chat(history, content);
-      addMessage("whatsapp", chatId, "user", content);
+      const response = await this.llm.chat(history.slice(0, -1), content);
       addMessage("whatsapp", chatId, "assistant", response);
 
       // Check for <voice> tag
