@@ -96,6 +96,9 @@ export class DiscordBridge {
       return;
     }
 
+    // Append user message immediately to prevent race conditions during rapid typing
+    addMessage("discord", message.channel.id, "user", content);
+
     // Show typing indicator
     await message.channel.sendTyping();
 
@@ -104,10 +107,9 @@ export class DiscordBridge {
 
     try {
       // Get LLM response
-      const response = await this.llm.chat(history, content);
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      // Store messages
-      addMessage("discord", message.channel.id, "user", content);
+      // Store assistant message
       addMessage("discord", message.channel.id, "assistant", response);
 
       // Split long responses (Discord has 2000 char limit)
