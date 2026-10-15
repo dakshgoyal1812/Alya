@@ -379,29 +379,55 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
-                });
+          if (os.platform() !== "win32") {
+            // Linux/macOS dynamic OS support
+            const output = execSync("df -k", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 6) {
+                const drive = parts[5]; // mount point
+                const totalBytes = (parseInt(parts[1]) || 0) * 1024;
+                const usedBytes = (parseInt(parts[2]) || 0) * 1024;
+                const freeBytes = (parseInt(parts[3]) || 0) * 1024;
+                if (totalBytes > 0 && (drive === "/" || drive.startsWith("/Volumes") || drive.startsWith("/mnt") || drive.startsWith("/media"))) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
               }
             }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            // Works on Windows
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
+              }
+            }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -413,9 +439,14 @@ export async function executeTool(name, args) {
         }
       }
 
-      case "calculator":
-        // Safe evaluation of simple math
-        return String(new Function(`return ${args.expression}`)());
+      case "calculator": {
+        // Safe evaluation of simple math via strict regex check
+        const expr = String(args.expression).trim();
+        if (!/^[0-9+\-*/().\s]+$/.test(expr)) {
+          return "Error: Mathematical expression contains forbidden characters.";
+        }
+        return String(new Function(`return ${expr}`)());
+      }
 
       case "send_email": {
         const config = loadConfig();
@@ -493,6 +524,29 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
+          const parsedUrl = new URL(args.url);
+          if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+            return "Error: Invalid protocol. Only http: and https: are allowed.";
+          }
+          const hostname = parsedUrl.hostname.toLowerCase();
+
+          const isLoopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+          const isPrivateIp =
+            hostname.startsWith("10.") ||
+            hostname.startsWith("192.168.") ||
+            (hostname.startsWith("172.") && (() => {
+              const parts = hostname.split(".");
+              const secondOctet = parseInt(parts[1], 10);
+              return secondOctet >= 16 && secondOctet <= 31;
+            })()) ||
+            hostname.startsWith("169.254.") ||
+            hostname.startsWith("fc00:") ||
+            hostname.startsWith("fe80:");
+
+          if (isLoopback || isPrivateIp) {
+            return "Error: Access to private/local network resources is forbidden (SSRF Protection).";
+          }
+
           const response = await fetch(args.url);
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
@@ -570,8 +624,21 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          const resolvedPath = path.resolve(args.absolutePath);
+          const isTraversal = args.absolutePath.includes("..") || resolvedPath !== path.normalize(args.absolutePath);
+          const isForbidden =
+            resolvedPath.includes("/etc/") ||
+            resolvedPath.includes("/var/") ||
+            resolvedPath.toLowerCase().includes("system32") ||
+            resolvedPath.toLowerCase().includes(".git") ||
+            resolvedPath.toLowerCase().includes("config/");
+
+          if (isTraversal || isForbidden) {
+            return "Error: Path traversal or access to restricted system directory detected.";
+          }
+
+          if (!fs.existsSync(resolvedPath)) return `File not found at: ${args.absolutePath}`;
+          const dataBuffer = fs.readFileSync(resolvedPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +648,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "[Python Sandbox Disabled]: The python execution tool is disabled as a critical security measure to prevent arbitrary code execution on host machines.";
       }
 
       case "control_spotify": {
