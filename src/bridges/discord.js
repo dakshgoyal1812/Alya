@@ -99,15 +99,18 @@ export class DiscordBridge {
     // Show typing indicator
     await message.channel.sendTyping();
 
-    // Get conversation history
+    // Get conversation history snapshot before adding the new user message
     const history = getHistory("discord", message.channel.id);
+    const historySnapshot = [...history];
 
     try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
-
-      // Store messages
+      // Store user message immediately to prevent race conditions
       addMessage("discord", message.channel.id, "user", content);
+
+      // Get LLM response using history snapshot
+      const response = await this.llm.chat(historySnapshot, content);
+
+      // Store assistant message
       addMessage("discord", message.channel.id, "assistant", response);
 
       // Split long responses (Discord has 2000 char limit)
