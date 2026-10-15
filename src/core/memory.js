@@ -4,7 +4,7 @@
 // All data stays local — privacy first! ✨
 // ============================================================
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, promises as fsPromises } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -43,6 +43,19 @@ function getKey(platform, channelId) {
 }
 
 /**
+ * Helper to serialize a conversation payload efficiently to a compact JSON string.
+ */
+function serializeConversation(platform, channelId, messages) {
+  return JSON.stringify({
+    platform,
+    channelId,
+    lastUpdated: new Date().toISOString(),
+    messageCount: messages.length,
+    messages,
+  });
+}
+
+/**
  * Load a conversation from disk
  */
 function loadFromDisk(platform, channelId) {
@@ -59,7 +72,7 @@ function loadFromDisk(platform, channelId) {
 }
 
 /**
- * Save a conversation to disk
+ * Save a conversation to disk synchronously (used on exit or clear)
  */
 function saveToDisk(platform, channelId) {
   const key = getKey(platform, channelId);
@@ -67,22 +80,26 @@ function saveToDisk(platform, channelId) {
   const filePath = getFilePath(platform, channelId);
 
   try {
-    writeFileSync(
-      filePath,
-      JSON.stringify(
-        {
-          platform,
-          channelId,
-          lastUpdated: new Date().toISOString(),
-          messageCount: messages.length,
-          messages,
-        },
-        null,
-        2
-      )
-    );
+    const payload = serializeConversation(platform, channelId, messages);
+    writeFileSync(filePath, payload);
   } catch (error) {
     console.error(`Error saving conversation ${platform}:${channelId}:`, error.message);
+  }
+}
+
+/**
+ * Save a conversation to disk asynchronously to avoid blocking the event loop
+ */
+async function saveToDiskAsync(platform, channelId) {
+  const key = getKey(platform, channelId);
+  const messages = conversations.get(key) || [];
+  const filePath = getFilePath(platform, channelId);
+
+  try {
+    const payload = serializeConversation(platform, channelId, messages);
+    await fsPromises.writeFile(filePath, payload);
+  } catch (error) {
+    console.error(`Error saving conversation ${platform}:${channelId} asynchronously:`, error.message);
   }
 }
 
@@ -124,9 +141,9 @@ export function addMessage(platform, channelId, role, content) {
     history.splice(0, history.length - MAX_HISTORY);
   }
 
-  // Save to disk every 5 messages
+  // Save to disk asynchronously every 5 messages to avoid event-loop lag
   if (history.length % 5 === 0) {
-    saveToDisk(platform, channelId);
+    saveToDiskAsync(platform, channelId);
   }
 }
 
@@ -140,12 +157,17 @@ export function clearHistory(platform, channelId) {
 }
 
 /**
- * Flush all conversations to disk
+ * Flush all conversations to disk synchronously
  */
 export function flushAll() {
   for (const [key] of conversations) {
-    const [platform, channelId] = key.split(":");
-    saveToDisk(platform, channelId);
+    // Optimization: Parse platform and channelId using fast indexOf/substring to handle colons properly
+    const colonIndex = key.indexOf(":");
+    if (colonIndex !== -1) {
+      const platform = key.substring(0, colonIndex);
+      const channelId = key.substring(colonIndex + 1);
+      saveToDisk(platform, channelId);
+    }
   }
 }
 
@@ -160,12 +182,14 @@ export function getStats() {
   for (const [key, messages] of conversations) {
     totalConversations++;
     totalMessages += messages.length;
-    const platform = key.split(":")[0];
+    // Optimization: Avoid split for single character lookups
+    const colonIndex = key.indexOf(":");
+    const platform = colonIndex !== -1 ? key.substring(0, colonIndex) : key;
     platforms[platform] = (platforms[platform] || 0) + 1;
   }
 
   return { totalMessages, totalConversations, platforms };
 }
 
-// Flush conversations to disk on exit
+// Flush conversations to disk on exit (must be sync as event loop is closing)
 process.on("exit", flushAll);
