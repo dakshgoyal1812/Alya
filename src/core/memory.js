@@ -67,19 +67,16 @@ function saveToDisk(platform, channelId) {
   const filePath = getFilePath(platform, channelId);
 
   try {
+    // Optimization: Omit indentation parameters to reduce JSON stringification overhead and file size
     writeFileSync(
       filePath,
-      JSON.stringify(
-        {
-          platform,
-          channelId,
-          lastUpdated: new Date().toISOString(),
-          messageCount: messages.length,
-          messages,
-        },
-        null,
-        2
-      )
+      JSON.stringify({
+        platform,
+        channelId,
+        lastUpdated: new Date().toISOString(),
+        messageCount: messages.length,
+        messages,
+      })
     );
   } catch (error) {
     console.error(`Error saving conversation ${platform}:${channelId}:`, error.message);
@@ -144,8 +141,14 @@ export function clearHistory(platform, channelId) {
  */
 export function flushAll() {
   for (const [key] of conversations) {
-    const [platform, channelId] = key.split(":");
-    saveToDisk(platform, channelId);
+    // Optimization: Use indexOf and substring instead of split(":") to avoid array allocation
+    // and correctly handle channel IDs containing colons
+    const colonIdx = key.indexOf(":");
+    if (colonIdx !== -1) {
+      const platform = key.substring(0, colonIdx);
+      const channelId = key.substring(colonIdx + 1);
+      saveToDisk(platform, channelId);
+    }
   }
 }
 
@@ -160,7 +163,9 @@ export function getStats() {
   for (const [key, messages] of conversations) {
     totalConversations++;
     totalMessages += messages.length;
-    const platform = key.split(":")[0];
+    // Optimization: Use indexOf and substring instead of split(":") to avoid temporary array allocation
+    const colonIdx = key.indexOf(":");
+    const platform = colonIdx !== -1 ? key.substring(0, colonIdx) : key;
     platforms[platform] = (platforms[platform] || 0) + 1;
   }
 
