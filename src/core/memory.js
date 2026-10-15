@@ -144,8 +144,14 @@ export function clearHistory(platform, channelId) {
  */
 export function flushAll() {
   for (const [key] of conversations) {
-    const [platform, channelId] = key.split(":");
-    saveToDisk(platform, channelId);
+    // Performance Optimization: Use indexOf and substring instead of split() to avoid array allocation
+    // and correctly handle platforms where channelId contains colons (e.g. Slack).
+    const index = key.indexOf(":");
+    if (index !== -1) {
+      const platform = key.substring(0, index);
+      const channelId = key.substring(index + 1);
+      saveToDisk(platform, channelId);
+    }
   }
 }
 
@@ -160,7 +166,9 @@ export function getStats() {
   for (const [key, messages] of conversations) {
     totalConversations++;
     totalMessages += messages.length;
-    const platform = key.split(":")[0];
+    // Performance Optimization: Use indexOf and substring instead of split() to avoid array allocation
+    const index = key.indexOf(":");
+    const platform = index !== -1 ? key.substring(0, index) : key;
     platforms[platform] = (platforms[platform] || 0) + 1;
   }
 
