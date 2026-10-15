@@ -94,11 +94,14 @@ export class WhatsAppBridge {
       return;
     }
 
+    // Store user message immediately to prevent race conditions during rapid concurrent typing
+    addMessage("whatsapp", chatId, "user", content);
+
     chat.sendStateTyping();
     const history = getHistory("whatsapp", chatId);
     try {
-      const response = await this.llm.chat(history, content);
-      addMessage("whatsapp", chatId, "user", content);
+      // Get LLM response (slice off the user message from history, passing it as userMessage parameter)
+      const response = await this.llm.chat(history.slice(0, -1), content);
       addMessage("whatsapp", chatId, "assistant", response);
 
       // Check for <voice> tag

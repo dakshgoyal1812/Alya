@@ -1,6 +1,9 @@
 import os from "os";
 import fs from "fs";
 import path from "path";
+import dns from "dns";
+import { promisify } from "util";
+const lookupAsync = promisify(dns.lookup);
 import { YoutubeTranscript } from "youtube-transcript";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
@@ -9,6 +12,23 @@ import nodemailer from "nodemailer";
 import { search } from "duck-duck-scrape";
 import { loadConfig } from "./config.js";
 import { execSync } from "child_process";
+
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  if (ip === "::1" || ip === "::") return true;
+  const parts = ip.split(".").map(Number);
+  if (parts.length === 4) {
+    const [p0, p1, p2, p3] = parts;
+    if (p0 === 127) return true;
+    if (p0 === 10) return true;
+    if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
+    if (p0 === 192 && p1 === 168) return true;
+    if (p0 === 169 && p1 === 254) return true;
+    if (p0 === 0) return true;
+  }
+  if (ip.startsWith("fe80:") || ip.startsWith("fc00:") || ip.startsWith("fd00:")) return true;
+  return false;
+}
 
 const MEMORY_FILE = path.join(process.cwd(), "data", "long_term_memory.json");
 const BACKUP_DIR = path.join(process.cwd(), "data", "backups");
@@ -379,29 +399,62 @@ export async function executeTool(name, args) {
 
       case "get_storage_info": {
         try {
-          // Works on Windows
-          const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
-          const lines = output.trim().split("\n").filter(l => l.trim());
-          const drives = [];
-          for (let i = 1; i < lines.length; i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length >= 3) {
-              const drive = parts[0];
-              const freeBytes = parseInt(parts[1]) || 0;
-              const totalBytes = parseInt(parts[2]) || 0;
-              const usedBytes = totalBytes - freeBytes;
-              if (totalBytes > 0) {
-                drives.push({
-                  drive,
-                  totalGB: (totalBytes / 1073741824).toFixed(1),
-                  usedGB: (usedBytes / 1073741824).toFixed(1),
-                  freeGB: (freeBytes / 1073741824).toFixed(1),
-                  usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
-                });
+          if (process.platform === "win32") {
+            // Works on Windows
+            const output = execSync("wmic logicaldisk get size,freespace,caption", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              if (parts.length >= 3) {
+                const drive = parts[0];
+                const freeBytes = parseInt(parts[1]) || 0;
+                const totalBytes = parseInt(parts[2]) || 0;
+                const usedBytes = totalBytes - freeBytes;
+                if (totalBytes > 0) {
+                  drives.push({
+                    drive,
+                    totalGB: (totalBytes / 1073741824).toFixed(1),
+                    usedGB: (usedBytes / 1073741824).toFixed(1),
+                    freeGB: (freeBytes / 1073741824).toFixed(1),
+                    usagePercent: Math.round((usedBytes / totalBytes) * 100) + "%"
+                  });
+                }
               }
             }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
+          } else {
+            // Unix/macOS - use df -k
+            const output = execSync("df -k", { encoding: "utf-8" });
+            const lines = output.trim().split("\n").filter(l => l.trim());
+            const drives = [];
+            const isMac = process.platform === "darwin";
+            for (let i = 1; i < lines.length; i++) {
+              const parts = lines[i].trim().split(/\s+/);
+              const minColumns = isMac ? 9 : 6;
+              if (parts.length >= minColumns) {
+                const filesystem = parts[0];
+                const mountedOn = isMac ? parts[8] : parts[5];
+                const usagePercent = parts[4];
+                if (filesystem.startsWith("/dev/") || filesystem === "tmpfs" || mountedOn === "/") {
+                  const totalKB = parseInt(parts[1]) || 0;
+                  const usedKB = parseInt(parts[2]) || 0;
+                  const freeKB = parseInt(parts[3]) || 0;
+                  if (totalKB > 0) {
+                    drives.push({
+                      filesystem,
+                      mountedOn,
+                      totalGB: (totalKB / 1024 / 1024).toFixed(1),
+                      usedGB: (usedKB / 1024 / 1024).toFixed(1),
+                      freeGB: (freeKB / 1024 / 1024).toFixed(1),
+                      usagePercent
+                    });
+                  }
+                }
+              }
+            }
+            return JSON.stringify({ drives, deviceName: os.hostname() });
           }
-          return JSON.stringify({ drives, deviceName: os.hostname() });
         } catch (e) {
           // Fallback — basic info from os module
           const totalMem = os.totalmem();
@@ -413,9 +466,14 @@ export async function executeTool(name, args) {
         }
       }
 
-      case "calculator":
+      case "calculator": {
+        const sanitized = String(args.expression || "").trim();
+        if (!/^[0-9+\-*/().\s]+$/.test(sanitized)) {
+          return "Error: Invalid or unsafe expression. Only numbers and basic mathematical operators (+, -, *, /, (), .) are allowed.";
+        }
         // Safe evaluation of simple math
-        return String(new Function(`return ${args.expression}`)());
+        return String(new Function(`return ${sanitized}`)());
+      }
 
       case "send_email": {
         const config = loadConfig();
@@ -493,7 +551,52 @@ export async function executeTool(name, args) {
 
       case "read_website": {
         try {
-          const response = await fetch(args.url);
+          let currentUrl = args.url;
+          let redirectCount = 0;
+          let response;
+
+          while (redirectCount < 5) {
+            const parsedUrl = new URL(currentUrl);
+            const hostname = parsedUrl.hostname.toLowerCase();
+
+            // Block loopback and local hostnames
+            if (
+              hostname === "localhost" ||
+              hostname === "localhost.localdomain" ||
+              hostname === "[::1]" ||
+              hostname === "0.0.0.0"
+            ) {
+              return "Error: Access to local network or loopback addresses is blocked for security reasons.";
+            }
+
+            let ip = hostname;
+            const ipRegex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
+            if (!ipRegex.test(hostname) && hostname !== "[::1]") {
+              try {
+                const res = await lookupAsync(hostname);
+                ip = res.address;
+              } catch (err) {
+                return `Error: Failed to resolve hostname: ${err.message}`;
+              }
+            }
+
+            if (isPrivateIp(ip)) {
+              return "Error: Access to private network addresses is blocked for security reasons.";
+            }
+
+            response = await fetch(currentUrl, { redirect: "manual" });
+
+            if (response.status >= 300 && response.status < 400) {
+              const location = response.headers.get("location");
+              if (!location) break;
+
+              currentUrl = new URL(location, currentUrl).toString();
+              redirectCount++;
+            } else {
+              break;
+            }
+          }
+
           if (!response.ok) return `Error fetching URL: ${response.status} ${response.statusText}`;
           const html = await response.text();
           // Extremely basic text extraction (strip html and scripts)
@@ -570,8 +673,32 @@ export async function executeTool(name, args) {
 
       case "read_pdf": {
         try {
-          if (!fs.existsSync(args.absolutePath)) return `File not found at: ${args.absolutePath}`;
-          const dataBuffer = fs.readFileSync(args.absolutePath);
+          const rawPath = args.absolutePath || "";
+
+          // Explicitly block path traversal characters in original input
+          if (rawPath.includes("..")) {
+            return "Error: Path traversal sequences are blocked for security reasons.";
+          }
+
+          const targetPath = path.resolve(rawPath);
+          // Normalize separators to forward slashes for OS-independent containment checks
+          const normalizedPath = targetPath.split(path.sep).join("/").toLowerCase();
+
+          // Block sensitive paths (including system directories)
+          if (
+            normalizedPath.includes("/etc/") ||
+            normalizedPath.includes("/var/") ||
+            normalizedPath.includes("/sys/") ||
+            normalizedPath.includes("/proc/") ||
+            normalizedPath.includes("/dev/") ||
+            normalizedPath.includes("/system32/") ||
+            normalizedPath.includes("/windows/")
+          ) {
+            return "Error: Access to this file path is blocked for security reasons.";
+          }
+
+          if (!fs.existsSync(targetPath)) return `File not found at: ${targetPath}`;
+          const dataBuffer = fs.readFileSync(targetPath);
           const pdfData = await pdf(dataBuffer);
           const textChunk = pdfData.text.substring(0, 15000);
           return `[PDF Text Excerpt]:\n${textChunk}\n\n[System Note: Provide answers based on this text.]`;
@@ -581,19 +708,7 @@ export async function executeTool(name, args) {
       }
 
       case "execute_python_code": {
-        try {
-          const tempDir = path.join(process.cwd(), "data", "temp");
-          if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-          const tempFile = path.join(tempDir, `script_${Date.now()}.py`);
-          fs.writeFileSync(tempFile, args.code);
-
-          // Execute the python file (requires python installed on host)
-          const output = execSync(`python "${tempFile}"`, { encoding: "utf8", timeout: 10000 });
-          return `[Python Sandbox Output]:\n${output.trim()}\n\n[System Note: Relate this output back to the user.]`;
-        } catch (err) {
-          return `[Python Sandbox Error]: ${err.message}\nMake sure your code has no syntax errors and 'python' is installed on the host.`;
-        }
+        return "Error: Python code execution is disabled for security reasons.";
       }
 
       case "control_spotify": {

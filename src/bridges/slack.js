@@ -78,13 +78,16 @@ export class SlackBridge {
       return;
     }
 
-    // Get conversation history
+    // Store user message immediately to prevent race conditions during rapid concurrent typing
+    addMessage("slack", channelId, "user", content);
+
+    // Get conversation history (which now includes the user message at the end)
     const history = getHistory("slack", channelId);
 
     try {
-      const response = await this.llm.chat(history, content);
+      // Get LLM response (slice off the user message from history, passing it as userMessage parameter)
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say(response);
@@ -107,12 +110,15 @@ export class SlackBridge {
       return;
     }
 
+    // Store user message immediately to prevent race conditions during rapid concurrent typing
+    addMessage("slack", channelId, "user", content);
+
     const history = getHistory("slack", channelId);
 
     try {
-      const response = await this.llm.chat(history, content);
+      // Get LLM response (slice off the user message from history, passing it as userMessage parameter)
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      addMessage("slack", channelId, "user", content);
       addMessage("slack", channelId, "assistant", response);
 
       await say({
@@ -153,9 +159,9 @@ export class SlackBridge {
     }
 
     // Treat as a question
-    const history = getHistory("slack", command.channel_id);
-    const response = await this.llm.chat(history, command.text);
     addMessage("slack", command.channel_id, "user", command.text);
+    const history = getHistory("slack", command.channel_id);
+    const response = await this.llm.chat(history.slice(0, -1), command.text);
     addMessage("slack", command.channel_id, "assistant", response);
     await respond({ text: response });
   }

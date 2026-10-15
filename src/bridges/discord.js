@@ -96,18 +96,20 @@ export class DiscordBridge {
       return;
     }
 
+    // Store user message immediately to prevent race conditions during rapid concurrent typing
+    addMessage("discord", message.channel.id, "user", content);
+
     // Show typing indicator
     await message.channel.sendTyping();
 
-    // Get conversation history
+    // Get conversation history (which now includes the user message at the end)
     const history = getHistory("discord", message.channel.id);
 
     try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
+      // Get LLM response (slice off the user message from history, passing it as userMessage parameter)
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      // Store messages
-      addMessage("discord", message.channel.id, "user", content);
+      // Store assistant message
       addMessage("discord", message.channel.id, "assistant", response);
 
       // Split long responses (Discord has 2000 char limit)
