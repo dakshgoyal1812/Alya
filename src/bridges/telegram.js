@@ -126,12 +126,14 @@ _All systems operational._ ✨`;
     // Get conversation history
     const history = getHistory("telegram", chatId);
 
-    try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
+    // Store user message immediately on receipt to prevent race conditions
+    addMessage("telegram", chatId, "user", content);
 
-      // Store messages
-      addMessage("telegram", chatId, "user", content);
+    try {
+      // Get LLM response (pass history excluding the newly added user message)
+      const response = await this.llm.chat(history.slice(0, -1), content);
+
+      // Store assistant message
       addMessage("telegram", chatId, "assistant", response);
 
       // Split long messages (Telegram has 4096 char limit)
