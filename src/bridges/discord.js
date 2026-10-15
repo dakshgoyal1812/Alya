@@ -96,6 +96,9 @@ export class DiscordBridge {
       return;
     }
 
+    // Store user message immediately
+    addMessage("discord", message.channel.id, "user", content);
+
     // Show typing indicator
     await message.channel.sendTyping();
 
@@ -103,11 +106,10 @@ export class DiscordBridge {
     const history = getHistory("discord", message.channel.id);
 
     try {
-      // Get LLM response
-      const response = await this.llm.chat(history, content);
+      // Get LLM response, passing history without the newly added user message since chat() appends it
+      const response = await this.llm.chat(history.slice(0, -1), content);
 
-      // Store messages
-      addMessage("discord", message.channel.id, "user", content);
+      // Store assistant message
       addMessage("discord", message.channel.id, "assistant", response);
 
       // Split long responses (Discord has 2000 char limit)
